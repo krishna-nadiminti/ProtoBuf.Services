@@ -9,7 +9,7 @@ using System.ServiceModel;
 
 namespace ProtoBuf.Services.Infrastructure
 {
-    internal static class TypeFinder
+    public static class TypeFinder
     {
         internal static readonly string[] AssemblyExclusions = new[]
             {
@@ -19,6 +19,8 @@ namespace ProtoBuf.Services.Infrastructure
                 "Microsoft.",
                 "protobuf-"
             };
+
+        public static readonly List<string> AssembliesToSearch = new List<string>();
 
         private static readonly ConcurrentDictionary<string, ICollection<TypeInfo>> TypeParamCache = new ConcurrentDictionary<string, ICollection<TypeInfo>>();
         private static readonly ConcurrentDictionary<string, Type> ServiceContractCache = new ConcurrentDictionary<string, Type>();
@@ -133,8 +135,9 @@ namespace ProtoBuf.Services.Infrastructure
                     {
                         var attr = methodInfo.GetCustomAttribute<OperationContractAttribute>();
 
+                        var methodName = GetMethodName(methodInfo);
                         if (attr != null &&
-                            (attr.Name ?? methodInfo.Name).Equals(operationName, StringComparison.Ordinal))
+                            (attr.Name ?? methodName).Equals(operationName, StringComparison.Ordinal))
                         {
                             var inputParams = methodInfo.GetParameters();
 
@@ -143,8 +146,12 @@ namespace ProtoBuf.Services.Infrastructure
                                 retVal.AddRange(GetTypeInfo(parameterInfo.ParameterType, ParamType.Input, getDetailedTypes));
                             }
 
-                            if (methodInfo.ReturnParameter != null && methodInfo.ReturnParameter.ParameterType != typeof(void))
-                                retVal.AddRange(GetTypeInfo(methodInfo.ReturnParameter.ParameterType, ParamType.Return, getDetailedTypes));
+                            if (methodInfo.ReturnParameter != null && methodInfo.ReturnParameter.ParameterType != typeof(void) &&
+                                methodInfo.ReturnParameter.ParameterType != typeof(System.Threading.Tasks.Task))
+                            {
+                                var paramType = GetActualParamType(methodInfo.ReturnParameter.ParameterType);
+                                retVal.AddRange(GetTypeInfo(paramType, ParamType.Return, getDetailedTypes));
+                            }
 
                             break;
                         }
@@ -153,6 +160,28 @@ namespace ProtoBuf.Services.Infrastructure
                 };
 
             return TypeParamCache.GetOrAdd(GetCacheKey(action, getDetailedTypes), actionName => paramGetter(serviceContractType, operationContractName));
+        }
+
+        private static Type GetActualParamType(Type parameterType)
+        {
+            if (parameterType.IsGenericType && 
+                parameterType.Name == "Task`1" && 
+                parameterType.GetGenericArguments().Length == 1)
+            {
+                return parameterType.GetGenericArguments()[0];
+            }
+
+            return parameterType;
+        }
+
+        private static string GetMethodName(MethodInfo methodInfo)
+        {
+            if ((methodInfo.ReturnType == typeof(System.Threading.Tasks.Task) || methodInfo.ReturnType.Name == "Task`1") && 
+                methodInfo.Name.EndsWith("Async", StringComparison.OrdinalIgnoreCase))
+            {
+                return methodInfo.Name.Substring(0, methodInfo.Name.Length - "Async".Length);
+            }
+            return methodInfo.Name;
         }
 
         public static IEnumerable<Type> GetDetailedTypes(Type type)
@@ -190,7 +219,11 @@ namespace ProtoBuf.Services.Infrastructure
                 {
                     var assemblies = AppDomain.CurrentDomain.GetAssemblies();
 
-                    foreach (var assembly in assemblies)
+                    var assembliesToSearch =
+                        AssembliesToSearch.Any()
+                        ? assemblies.Where(a => AssembliesToSearch.Contains(a.FullName)).ToArray()
+                        : assemblies;
+                    foreach (var assembly in assembliesToSearch)
                     {
                         if (AssemblyExclusions.Any(x => assembly.FullName.StartsWith(x, StringComparison.Ordinal)))
                             continue;
@@ -211,7 +244,7 @@ namespace ProtoBuf.Services.Infrastructure
 
                             if (attr != null)
                             {
-                                var target = (attr.Namespace ?? "http://tempuri.org").TrimEnd('/') + "/" + type.Name;
+                                var target = (attr.Namespace ?? "http://tempuri.org").TrimEnd('/') + "/" + attr.Name;
 
                                 if (contractNamespace.Equals(target, StringComparison.Ordinal))
                                 {
